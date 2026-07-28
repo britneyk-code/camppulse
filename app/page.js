@@ -1,176 +1,592 @@
 'use client'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { supabase } from './lib/supabase'
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts'
+
+const BUBBLE_COLORS = [
+  'bg-pink-500/20 text-pink-300',
+  'bg-purple-500/20 text-purple-300',
+  'bg-blue-500/20 text-blue-300',
+  'bg-teal-500/20 text-teal-300',
+  'bg-orange-500/20 text-orange-300',
+  'bg-lime-500/20 text-lime-300',
+  'bg-fuchsia-500/20 text-fuchsia-300',
+]
+
+const colorFor = (seed) => BUBBLE_COLORS[seed % BUBBLE_COLORS.length]
 
 export default function Home() {
-  const [currentBalance, setCurrentBalance] = useState('')
-  const [incomeLabel, setIncomeLabel] = useState('')
-  const [incomeAmount, setIncomeAmount] = useState('')
-  const [incomeDate, setIncomeDate] = useState('')
-  const [incomeCertainty, setIncomeCertainty] = useState('guaranteed')
-  const [incomeList, setIncomeList] = useState([])
-  const [expenseLabel, setExpenseLabel] = useState('')
-  const [expenseAmount, setExpenseAmount] = useState('')
-  const [expenseDate, setExpenseDate] = useState('')
-  const [expenseList, setExpenseList] = useState([])
-  const [showWorstCase, setShowWorstCase] = useState(false)
+  const [view, setView] = useState('sessions')
+  const [sessions, setSessions] = useState([])
+  const [sessionName, setSessionName] = useState('')
+  const [selectedSession, setSelectedSession] = useState(null)
+  const [camperName, setCamperName] = useState('')
+  const [campers, setCampers] = useState([])
+  const [activities, setActivities] = useState([])
+  const [activityName, setActivityName] = useState('')
+  const [activityCategory, setActivityCategory] = useState('creative')
+  const [selectedCamper, setSelectedCamper] = useState(null)
+  const [selectedActivity, setSelectedActivity] = useState(null)
+  const [engagement, setEngagement] = useState(null)
+  const [mood, setMood] = useState(null)
+  const [logNote, setLogNote] = useState('')
+  const [insights, setInsights] = useState(null)
 
-  const addIncome = async () => {
-    if (!incomeAmount || !incomeDate) return
-    const entry = { label: incomeLabel, amount: parseFloat(incomeAmount), date: incomeDate, certainty: incomeCertainty }
-    const { error } = await supabase.from('income').insert([entry])
+  useEffect(() => {
+    fetchSessions()
+    fetchActivities()
+    fetchInsights()
+  }, [])
+
+  const fetchSessions = async () => {
+    const { data } = await supabase.from('sessions').select('*').order('created_at', { ascending: false })
+    if (data) setSessions(data)
+  }
+
+  const fetchActivities = async () => {
+    const { data } = await supabase.from('activities').select('*').order('created_at', { ascending: false })
+    if (data) setActivities(data)
+  }
+
+  const fetchInsights = async () => {
+    const { data: logs } = await supabase.from('logs').select('*')
+    if (!logs || logs.length === 0) { setInsights({ sessionGroups: {}, totalLogs: 0 }); return }
+
+    const { data: allCampers } = await supabase.from('campers').select('*')
+    const { data: allActivities } = await supabase.from('activities').select('*')
+    const { data: allSessions } = await supabase.from('sessions').select('*')
+
+    if (!allCampers || !allActivities || !allSessions) return
+
+    // camper id -> { name, sessionLabel }
+    const sessionNameById = {}
+    allSessions.forEach(s => sessionNameById[s.id] = s.name)
+
+    const camperMap = {}
+    allCampers.forEach(c => {
+      camperMap[c.id] = {
+        name: c.name,
+        sessionLabel: sessionNameById[c.session_id] || 'No session',
+      }
+    })
+
+    const activityMap2 = {}
+    allActivities.forEach(a => activityMap2[a.id] = { name: a.name, category: a.category })
+
+    // Group everything by session
+    const sessionGroups = {}
+
+    logs.forEach(log => {
+      const activityInfo = activityMap2[log.activity_id]
+      const camperInfo = camperMap[log.camper_id]
+      if (!activityInfo || !camperInfo) return
+
+      const sessionLabel = camperInfo.sessionLabel
+      if (!sessionGroups[sessionLabel]) {
+        sessionGroups[sessionLabel] = {
+          logCount: 0,
+          activityMap: {},      // activityName -> { total, count, category, campers: { camperName -> {total, count} } }
+          camperCategoryMap: {}, // "camper__category" -> { camper, category, total, count }
+        }
+      }
+      const group = sessionGroups[sessionLabel]
+      group.logCount += 1
+
+      // Activity averages (within this session)
+      const aName = activityInfo.name
+      if (!group.activityMap[aName]) group.activityMap[aName] = { total: 0, count: 0, category: activityInfo.category, campers: {} }
+      group.activityMap[aName].total += log.engagement
+      group.activityMap[aName].count += 1
+      if (!group.activityMap[aName].campers[camperInfo.name]) group.activityMap[aName].campers[camperInfo.name] = { total: 0, count: 0 }
+      group.activityMap[aName].campers[camperInfo.name].total += log.engagement
+      group.activityMap[aName].campers[camperInfo.name].count += 1
+
+      // Camper + category averages (within this session)
+      const key = `${camperInfo.name}__${activityInfo.category}`
+      if (!group.camperCategoryMap[key]) group.camperCategoryMap[key] = { camper: camperInfo.name, category: activityInfo.category, total: 0, count: 0 }
+      group.camperCategoryMap[key].total += log.engagement
+      group.camperCategoryMap[key].count += 1
+    })
+
+    setInsights({ sessionGroups, totalLogs: logs.length })
+  }
+
+  const addSession = async () => {
+    if (!sessionName) return
+    const { error } = await supabase.from('sessions').insert([{ name: sessionName }])
+    if (!error) { setSessionName(''); fetchSessions() }
+  }
+
+  const selectSession = async (session) => {
+    setSelectedSession(session)
+    setView('campers')
+    const { data } = await supabase.from('campers').select('*').eq('session_id', session.id)
+    if (data) setCampers(data)
+  }
+
+  const addCamper = async () => {
+    if (!camperName || !selectedSession) return
+    const { error } = await supabase.from('campers').insert([{ name: camperName, session_id: selectedSession.id }])
+    if (!error) { setCamperName(''); selectSession(selectedSession) }
+  }
+
+  const addActivity = async () => {
+    if (!activityName) return
+    const { error } = await supabase.from('activities').insert([{ name: activityName, category: activityCategory }])
+    if (!error) { setActivityName(''); fetchActivities() }
+  }
+
+  const loadCampersForLog = async (sessionId) => {
+    const session = sessions.find(s => s.id === parseInt(sessionId))
+    if (!session) return
+    setSelectedSession(session)
+    const { data } = await supabase.from('campers').select('*').eq('session_id', session.id)
+    if (data) setCampers(data)
+  }
+
+  const submitLog = async () => {
+    if (!selectedCamper || !selectedActivity || !engagement) return
+    const entry = {
+      camper_id: selectedCamper.id,
+      activity_id: selectedActivity.id,
+      engagement,
+      mood,
+      notes: logNote,
+      logged_at: new Date().toISOString().split('T')[0]
+    }
+    console.log('submitting:', entry)
+    const { data, error } = await supabase.from('logs').insert([entry])
+    console.log('error:', error)
     if (!error) {
-      setIncomeList([...incomeList, entry])
-      setIncomeLabel(''); setIncomeAmount(''); setIncomeDate(''); setIncomeCertainty('guaranteed')
+      setSelectedCamper(null)
+      setSelectedActivity(null)
+      setEngagement(null)
+      setMood(null)
+      setLogNote('')
+      fetchInsights()
+      alert('Log saved!')
     }
   }
 
-  const addExpense = async () => {
-    if (!expenseAmount || !expenseDate) return
-    const entry = { label: expenseLabel, amount: parseFloat(expenseAmount), date: expenseDate, recurring: false }
-    const { error } = await supabase.from('expenses').insert([entry])
-    if (!error) {
-      setExpenseList([...expenseList, entry])
-      setExpenseLabel(''); setExpenseAmount(''); setExpenseDate('')
-    }
+  const categoryStyles = {
+    creative: { bg: 'bg-purple-500/20', text: 'text-purple-300', emoji: '🎨' },
+    competitive: { bg: 'bg-red-500/20', text: 'text-red-300', emoji: '🏆' },
+    physical: { bg: 'bg-orange-500/20', text: 'text-orange-300', emoji: '⚡' },
+    social: { bg: 'bg-blue-500/20', text: 'text-blue-300', emoji: '💬' },
   }
 
-  const calculateForecast = (worstCase = false) => {
-    if (!currentBalance) return []
-    let balance = parseFloat(currentBalance)
-    const forecast = []
-    for (let i = 0; i < 14; i++) {
-      const date = new Date()
-      date.setDate(date.getDate() + i)
-      const dateStr = date.toISOString().split('T')[0]
-      const dayIncome = incomeList
-        .filter(inc => inc.date === dateStr && (!worstCase || inc.certainty === 'guaranteed'))
-        .reduce((sum, inc) => sum + inc.amount, 0)
-      const dayExpenses = expenseList
-        .filter(exp => exp.date === dateStr)
-        .reduce((sum, exp) => sum + exp.amount, 0)
-      balance = balance + dayIncome - dayExpenses
-      forecast.push({ date: dateStr.slice(5), balance: parseFloat(balance.toFixed(2)) })
-    }
-    return forecast
+  const engagementColors = {
+    1: 'bg-red-500 text-white',
+    2: 'bg-orange-500 text-white',
+    3: 'bg-yellow-500 text-gray-950',
+    4: 'bg-lime-500 text-gray-950',
+    5: 'bg-green-500 text-white',
   }
 
-  const calculateSafeToSpend = () => {
-    if (!currentBalance || incomeList.length === 0) return null
-    const today = new Date()
-    const nextIncome = incomeList
-      .filter(inc => inc.certainty === 'guaranteed' && new Date(inc.date) > today)
-      .sort((a, b) => new Date(a.date) - new Date(b.date))[0]
-    if (!nextIncome) return null
-    const daysUntilPaid = Math.ceil((new Date(nextIncome.date) - today) / (1000 * 60 * 60 * 24))
-    const upcomingExpenses = expenseList
-      .filter(exp => new Date(exp.date) <= new Date(nextIncome.date))
-      .reduce((sum, exp) => sum + exp.amount, 0)
-    const available = parseFloat(currentBalance) - upcomingExpenses
-    return (available / daysUntilPaid).toFixed(2)
+  const engagementBg = (avg) => {
+    if (avg >= 4.5) return 'bg-green-500/20 text-green-300'
+    if (avg >= 3.5) return 'bg-lime-500/20 text-lime-300'
+    if (avg >= 2.5) return 'bg-yellow-500/20 text-yellow-300'
+    if (avg >= 1.5) return 'bg-orange-500/20 text-orange-300'
+    return 'bg-red-500/20 text-red-300'
   }
 
-  const forecast = calculateForecast(showWorstCase)
-  const safeToSpend = calculateSafeToSpend()
+  const navItems = [
+    { id: 'sessions', label: 'Sessions', icon: '🏕️' },
+    { id: 'log', label: 'Log', icon: '✏️' },
+    { id: 'activities', label: 'Activities', icon: '🎯' },
+    { id: 'insights', label: 'Insights', icon: '📊' },
+  ]
+
+  const BubbleName = ({ name, seed = 0, size = 'w-8 h-8 text-sm' }) => {
+    const words = name.split(' ')
+    let letterIndex = 0
+    return (
+      <div className="flex gap-2 flex-wrap">
+        {words.map((word, w) => (
+          <div key={w} className="flex gap-[3px] shrink-0">
+            {word.split('').map((letter, i) => {
+              const bubble = (
+                <span
+                  key={i}
+                  className={`${size} rounded-full flex items-center justify-center font-extrabold ${colorFor(seed + letterIndex)}`}
+                >
+                  {letter.toUpperCase()}
+                </span>
+              )
+              letterIndex++
+              return bubble
+            })}
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  // Generate insight cards ("thrives in X, disengages in Y") from a camperCategoryMap
+  const generateInsightCards = (camperCategoryMap) => {
+    if (!camperCategoryMap) return []
+    const cards = []
+    const camperGroups = {}
+
+    Object.values(camperCategoryMap).forEach(entry => {
+      if (!camperGroups[entry.camper]) camperGroups[entry.camper] = []
+      camperGroups[entry.camper].push({ ...entry, avg: entry.total / entry.count })
+    })
+
+    Object.entries(camperGroups).forEach(([camper, cats]) => {
+      if (cats.length < 2) return
+      const sorted = [...cats].sort((a, b) => b.avg - a.avg)
+      const best = sorted[0]
+      const worst = sorted[sorted.length - 1]
+      if (best.category !== worst.category) {
+        cards.push({
+          camper,
+          text: `${camper} thrives in ${best.category} activities (${best.avg.toFixed(1)}/5) but disengages during ${worst.category} ones (${worst.avg.toFixed(1)}/5)`,
+        })
+      }
+    })
+    return cards
+  }
 
   return (
-    <main className="min-h-screen bg-gray-950 text-white p-6 max-w-md mx-auto">
-      <h1 className="text-2xl font-bold mb-1">FlowFi 💸</h1>
-      <p className="text-gray-400 text-sm mb-8">Know exactly how much you can safely spend</p>
+    <main className="min-h-screen bg-gray-950 text-white max-w-md mx-auto flex flex-col">
 
-      {/* Current Balance */}
-      <div className="mb-6">
-        <label className="text-sm text-gray-400 mb-1 block">Current balance ($)</label>
-        <input type="number" value={currentBalance} onChange={(e) => setCurrentBalance(e.target.value)} placeholder="e.g. 847" className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white text-lg focus:outline-none focus:border-blue-500" />
+      <div className="px-6 pt-10 pb-4">
+        <h1 className="text-3xl font-bold tracking-tight">CampPulse</h1>
+        <p className="text-gray-500 text-sm mt-1">Track engagement. Spot patterns.</p>
       </div>
 
-      {/* Safe to Spend */}
-      {safeToSpend && (
-        <div className="mb-6 bg-gray-900 rounded-xl p-6 text-center border border-gray-700">
-          <p className="text-gray-400 text-sm mb-1">Safe to spend per day</p>
-          <p className="text-5xl font-bold text-green-400">${safeToSpend}</p>
-          <p className="text-gray-500 text-xs mt-2">until your next guaranteed income</p>
-        </div>
-      )}
+      <div className="flex px-6 gap-2 mb-8">
+        {navItems.map(item => (
+          <button
+            key={item.id}
+            onClick={() => setView(item.id)}
+            className={`flex-1 py-3 rounded-full text-sm font-semibold transition-all ${
+              view === item.id
+                ? 'bg-white text-gray-950 shadow-lg'
+                : 'bg-white/5 text-gray-500 hover:text-white'
+            }`}
+          >
+            <div className="text-lg">{item.icon}</div>
+            <div>{item.label}</div>
+          </button>
+        ))}
+      </div>
 
-      {/* Forecast Graph */}
-      {forecast.length > 0 && (
-        <div className="mb-6">
-          <div className="flex justify-between items-center mb-3">
-            <h2 className="text-lg font-semibold">14-day forecast</h2>
-            <button onClick={() => setShowWorstCase(!showWorstCase)} className={`text-xs px-3 py-1 rounded-full border ${showWorstCase ? 'border-red-500 text-red-400' : 'border-gray-600 text-gray-400'}`}>
-              {showWorstCase ? 'Worst case' : 'Best case'}
+      <div className="px-6 flex-1">
+
+        {/* SESSIONS VIEW */}
+        {view === 'sessions' && (
+          <div>
+            <div className="flex gap-2 mb-6">
+              <input
+                type="text"
+                value={sessionName}
+                onChange={(e) => setSessionName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && addSession()}
+                placeholder="e.g. Week 1 DC1 or Week 1 ON1"
+                className="flex-1 bg-white/5 rounded-full px-4 py-3.5 text-white text-sm placeholder-gray-600 focus:outline-none focus:bg-white/10"
+              />
+              <button onClick={addSession} className="bg-white text-gray-950 rounded-full px-5 font-bold text-sm">
+                Add
+              </button>
+            </div>
+            <p className="text-xs text-gray-600 uppercase tracking-widest mb-3">Your sessions</p>
+            <div className="space-y-3">
+              {sessions.map((session, i) => (
+                <div
+                  key={session.id}
+                  onClick={() => selectSession(session)}
+                  className={`cursor-pointer rounded-3xl px-5 py-4 transition-all hover:scale-[1.01] ${colorFor(i).split(' ')[0]}`}
+                >
+                  <p className={`font-bold text-sm ${colorFor(i).split(' ')[1]}`}>{session.name}</p>
+                  <p className="text-xs text-gray-400 mt-1">Tap to manage campers →</p>
+                </div>
+              ))}
+              {sessions.length === 0 && (
+                <p className="text-gray-600 text-sm text-center py-10">No sessions yet.</p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* CAMPERS VIEW */}
+        {view === 'campers' && selectedSession && (
+          <div>
+            <button onClick={() => setView('sessions')} className="text-gray-500 text-sm mb-6 hover:text-white transition-colors">
+              ← Back to sessions
+            </button>
+            <div className="mb-6">
+              <h2 className="text-xl font-bold">{selectedSession.name}</h2>
+              <p className="text-gray-500 text-sm mt-0.5">{campers.length} camper{campers.length !== 1 ? 's' : ''}</p>
+            </div>
+            <div className="flex gap-2 mb-6">
+              <input
+                type="text"
+                value={camperName}
+                onChange={(e) => setCamperName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && addCamper()}
+                placeholder="Camper name"
+                className="flex-1 bg-white/5 rounded-full px-4 py-3.5 text-white text-sm placeholder-gray-600 focus:outline-none focus:bg-white/10"
+              />
+              <button onClick={addCamper} className="bg-white text-gray-950 rounded-full px-5 font-bold text-sm">
+                Add
+              </button>
+            </div>
+            <p className="text-xs text-gray-600 uppercase tracking-widest mb-3">Campers</p>
+            <div className="space-y-3">
+              {campers.map((camper, i) => (
+                <div key={camper.id} className="rounded-3xl px-5 py-3.5 bg-white/5 flex items-center">
+                  <BubbleName name={camper.name} seed={i * 3} />
+                </div>
+              ))}
+              {campers.length === 0 && (
+                <p className="text-gray-600 text-sm text-center py-10">No campers yet.</p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* LOG VIEW */}
+        {view === 'log' && (
+          <div className="space-y-6">
+            <div>
+              <p className="text-xs text-gray-500 uppercase tracking-widest mb-2">Session</p>
+              <select
+                onChange={(e) => loadCampersForLog(e.target.value)}
+                className="w-full bg-white/5 rounded-full px-4 py-3.5 text-sm text-white focus:outline-none"
+              >
+                <option value="">Select a session</option>
+                {sessions.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </div>
+
+            {campers.length > 0 && (
+              <div>
+                <p className="text-xs text-gray-500 uppercase tracking-widest mb-3">Camper</p>
+                <div className="flex flex-wrap gap-2">
+                  {campers.map((camper, i) => (
+                    <button
+                      key={camper.id}
+                      onClick={() => setSelectedCamper(camper)}
+                      className={`rounded-full px-4 py-2.5 transition-all ${
+                        selectedCamper?.id === camper.id ? 'bg-white' : 'bg-white/5 hover:bg-white/10'
+                      }`}
+                    >
+                      <BubbleName name={camper.name} seed={i * 3} size="w-6 h-6 text-xs" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div>
+              <p className="text-xs text-gray-500 uppercase tracking-widest mb-3">Activity</p>
+              <div className="flex flex-wrap gap-2">
+                {activities.map(a => {
+                  const s = categoryStyles[a.category] || { bg: 'bg-white/5', text: 'text-gray-300', emoji: '•' }
+                  return (
+                    <button
+                      key={a.id}
+                      onClick={() => setSelectedActivity(a)}
+                      className={`rounded-full px-4 py-2.5 text-sm font-semibold transition-all ${
+                        selectedActivity?.id === a.id ? 'bg-white text-gray-950' : `${s.bg} ${s.text}`
+                      }`}
+                    >
+                      {s.emoji} {a.name}
+                    </button>
+                  )
+                })}
+                {activities.length === 0 && (
+                  <p className="text-gray-600 text-sm">No activities yet — add some in the Activities tab.</p>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-xs text-gray-500 uppercase tracking-widest mb-3">Engagement</p>
+              <div className="flex gap-3">
+                {[1,2,3,4,5].map(n => (
+                  <button
+                    key={n}
+                    onClick={() => setEngagement(n)}
+                    className={`flex-1 aspect-square rounded-full font-bold text-xl transition-all ${
+                      engagement === n ? engagementColors[n] : 'bg-white/5 text-gray-500 hover:bg-white/10'
+                    }`}
+                  >
+                    {n}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-xs text-gray-500 uppercase tracking-widest mb-3">Mood</p>
+              <div className="flex gap-3">
+                {[
+                  { emoji: '😊', label: 'Happy' },
+                  { emoji: '😐', label: 'Neutral' },
+                  { emoji: '😤', label: 'Frustrated' },
+                ].map(m => (
+                  <button
+                    key={m.emoji}
+                    onClick={() => setMood(m.emoji)}
+                    className={`flex-1 py-4 rounded-3xl flex flex-col items-center gap-1 transition-all ${
+                      mood === m.emoji ? 'bg-white' : 'bg-white/5 hover:bg-white/10'
+                    }`}
+                  >
+                    <span className="text-2xl">{m.emoji}</span>
+                    <span className={`text-xs font-medium ${mood === m.emoji ? 'text-gray-950' : 'text-gray-500'}`}>{m.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-xs text-gray-500 uppercase tracking-widest mb-2">Note (optional)</p>
+              <input
+                type="text"
+                value={logNote}
+                onChange={(e) => setLogNote(e.target.value)}
+                placeholder="Any observations..."
+                className="w-full bg-white/5 rounded-full px-4 py-3.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:bg-white/10"
+              />
+            </div>
+
+            <button
+              onClick={submitLog}
+              className="w-full bg-white text-gray-950 rounded-full py-4 font-bold text-sm tracking-wide"
+            >
+              Save log
             </button>
           </div>
-          <div className="bg-gray-900 rounded-xl p-4">
-            <ResponsiveContainer width="100%" height={200}>
-              <LineChart data={forecast}>
-                <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#9ca3af' }} />
-                <YAxis tick={{ fontSize: 10, fill: '#9ca3af' }} />
-                <Tooltip contentStyle={{ backgroundColor: '#111827', border: '1px solid #374151', borderRadius: '8px' }} />
-                <ReferenceLine y={0} stroke="#ef4444" strokeDasharray="3 3" />
-                <Line type="monotone" dataKey="balance" stroke={showWorstCase ? '#ef4444' : '#34d399'} strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
+        )}
+
+        {/* ACTIVITIES VIEW */}
+        {view === 'activities' && (
+          <div>
+            <div className="flex gap-2 mb-3">
+              <input
+                type="text"
+                value={activityName}
+                onChange={(e) => setActivityName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && addActivity()}
+                placeholder="Activity name"
+                className="flex-1 bg-white/5 rounded-full px-4 py-3.5 text-white text-sm placeholder-gray-600 focus:outline-none focus:bg-white/10"
+              />
+              <button onClick={addActivity} className="bg-white text-gray-950 rounded-full px-5 font-bold text-sm">
+                Add
+              </button>
+            </div>
+            <div className="flex gap-2 mb-6 flex-wrap">
+              {Object.entries(categoryStyles).map(([key, s]) => (
+                <button
+                  key={key}
+                  onClick={() => setActivityCategory(key)}
+                  className={`rounded-full px-4 py-2 text-sm font-semibold transition-all ${
+                    activityCategory === key ? 'bg-white text-gray-950' : `${s.bg} ${s.text}`
+                  }`}
+                >
+                  {s.emoji} {key.charAt(0).toUpperCase() + key.slice(1)}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-gray-600 uppercase tracking-widest mb-3">Activities</p>
+            <div className="space-y-3">
+              {activities.map(a => {
+                const s = categoryStyles[a.category] || { bg: 'bg-white/5', text: 'text-gray-400', emoji: '•' }
+                return (
+                  <div key={a.id} className={`rounded-3xl px-5 py-4 ${s.bg}`}>
+                    <span className={`text-xs font-bold ${s.text}`}>{s.emoji} {a.category}</span>
+                    <p className="text-base font-semibold mt-1">{a.name}</p>
+                  </div>
+                )
+              })}
+              {activities.length === 0 && (
+                <p className="text-gray-600 text-sm text-center py-10">No activities yet.</p>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* Add Income */}
-      <div className="mb-6">
-        <h2 className="text-lg font-semibold mb-3">Add income</h2>
-        <input type="text" value={incomeLabel} onChange={(e) => setIncomeLabel(e.target.value)} placeholder="Label (e.g. TA shift, freelance)" className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white mb-2 focus:outline-none focus:border-blue-500" />
-        <input type="number" value={incomeAmount} onChange={(e) => setIncomeAmount(e.target.value)} placeholder="Amount ($)" className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white mb-2 focus:outline-none focus:border-blue-500" />
-        <input type="date" value={incomeDate} onChange={(e) => setIncomeDate(e.target.value)} className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white mb-2 focus:outline-none focus:border-blue-500" />
-        <select value={incomeCertainty} onChange={(e) => setIncomeCertainty(e.target.value)} className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white mb-3 focus:outline-none focus:border-blue-500">
-          <option value="guaranteed">Guaranteed</option>
-          <option value="likely">Likely</option>
-          <option value="uncertain">Uncertain</option>
-        </select>
-        <button onClick={addIncome} className="w-full bg-blue-600 hover:bg-blue-700 rounded-lg px-4 py-3 font-semibold">+ Add income</button>
+        {/* INSIGHTS VIEW — grouped by session */}
+        {view === 'insights' && (
+          <div className="space-y-6">
+            {!insights || insights.totalLogs === 0 ? (
+              <p className="text-gray-600 text-sm text-center py-10">No logs yet. Start logging to see insights.</p>
+            ) : (
+              <>
+                <div className="bg-white/5 rounded-2xl px-5 py-4 flex justify-between items-center">
+                  <p className="text-sm text-gray-400">Total logs recorded</p>
+                  <p className="text-xl font-bold">{insights.totalLogs}</p>
+                </div>
+
+                {Object.entries(insights.sessionGroups).map(([sessionLabel, group], si) => {
+                  const cards = generateInsightCards(group.camperCategoryMap)
+                  const sortedActivities = Object.entries(group.activityMap)
+                    .sort((a, b) => (b[1].total / b[1].count) - (a[1].total / a[1].count))
+
+                  return (
+                    <div key={sessionLabel} className={`rounded-3xl px-5 py-5 ${colorFor(si).split(' ')[0]}`}>
+                      <div className="flex items-center justify-between mb-4">
+                        <p className={`font-bold text-base ${colorFor(si).split(' ')[1]}`}>{sessionLabel}</p>
+                        <span className="text-xs text-gray-400">{group.logCount} log{group.logCount !== 1 ? 's' : ''}</span>
+                      </div>
+
+                      {cards.length > 0 && (
+                        <div className="space-y-2 mb-4">
+                          {cards.map((card, ci) => (
+                            <div key={ci} className="bg-gray-950/40 rounded-2xl px-4 py-3">
+                              <p className="text-xs text-gray-400 mb-1">💡 Insight</p>
+                              <p className="text-sm font-medium leading-relaxed">{card.text}</p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <p className="text-xs text-gray-400 uppercase tracking-widest mb-2">Engagement by activity</p>
+                      <div className="space-y-2">
+                        {sortedActivities.map(([name, data]) => {
+                          const avg = (data.total / data.count).toFixed(1)
+                          const s = categoryStyles[data.category] || { emoji: '•', text: 'text-gray-400' }
+                          const camperRows = Object.entries(data.campers)
+                            .map(([camper, c]) => ({ camper, avg: c.total / c.count, count: c.count }))
+                            .sort((a, b) => b.avg - a.avg)
+                          return (
+                            <div key={name} className="bg-gray-950/40 rounded-2xl px-4 py-3">
+                              <div className="flex items-center justify-between">
+                                <div>
+                                  <p className="text-sm font-semibold">{name}</p>
+                                  <p className={`text-xs ${s.text}`}>{s.emoji} {data.category} · {data.count} log{data.count !== 1 ? 's' : ''}</p>
+                                </div>
+                                <span className={`text-sm font-bold px-3 py-1.5 rounded-full ${engagementBg(parseFloat(avg))}`}>
+                                  {avg}/5
+                                </span>
+                              </div>
+                              <div className="mt-2 pt-2 border-t border-white/10 space-y-1">
+                                {camperRows.map(row => (
+                                  <div key={row.camper} className="flex items-center justify-between">
+                                    <span className="text-xs text-gray-300">{row.camper}</span>
+                                    <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${engagementBg(row.avg)}`}>
+                                      {row.avg.toFixed(1)}/5{row.count > 1 ? ` (${row.count})` : ''}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )
+                })}
+              </>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* Income list */}
-      {incomeList.length > 0 && (
-        <div className="mb-6">
-          <h3 className="text-sm text-gray-400 mb-2">Upcoming income</h3>
-          {incomeList.map((inc, i) => (
-            <div key={i} className="flex justify-between items-center bg-gray-900 rounded-lg px-4 py-3 mb-2">
-              <div>
-                <p className="font-medium">{inc.label || 'Income'}</p>
-                <p className="text-sm text-gray-400">{inc.date} · {inc.certainty}</p>
-              </div>
-              <p className="text-green-400 font-semibold">+${inc.amount}</p>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Add Expense */}
-      <div className="mb-6">
-        <h2 className="text-lg font-semibold mb-3">Add expense</h2>
-        <input type="text" value={expenseLabel} onChange={(e) => setExpenseLabel(e.target.value)} placeholder="Label (e.g. rent, groceries)" className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white mb-2 focus:outline-none focus:border-blue-500" />
-        <input type="number" value={expenseAmount} onChange={(e) => setExpenseAmount(e.target.value)} placeholder="Amount ($)" className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white mb-2 focus:outline-none focus:border-blue-500" />
-        <input type="date" value={expenseDate} onChange={(e) => setExpenseDate(e.target.value)} className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white mb-3 focus:outline-none focus:border-blue-500" />
-        <button onClick={addExpense} className="w-full bg-red-600 hover:bg-red-700 rounded-lg px-4 py-3 font-semibold">+ Add expense</button>
-      </div>
-
-      {/* Expense list */}
-      {expenseList.length > 0 && (
-        <div className="mb-6">
-          <h3 className="text-sm text-gray-400 mb-2">Upcoming expenses</h3>
-          {expenseList.map((exp, i) => (
-            <div key={i} className="flex justify-between items-center bg-gray-900 rounded-lg px-4 py-3 mb-2">
-              <div>
-                <p className="font-medium">{exp.label || 'Expense'}</p>
-                <p className="text-sm text-gray-400">{exp.date}</p>
-              </div>
-              <p className="text-red-400 font-semibold">-${exp.amount}</p>
-            </div>
-          ))}
-        </div>
-      )}
+      <div className="h-10" />
     </main>
   )
 }
